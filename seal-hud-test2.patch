@@ -1,0 +1,275 @@
+--- a/mobile/build.gradle.kts
++++ b/mobile/build.gradle.kts
+@@ -17,7 +17,7 @@
+         applicationId = "com.shihab.diplay"
+         minSdk = 28
+         targetSdk = 37
+-        versionCode = 29
++        versionCode = 30
+         versionName = "0.2.10"
+ 
+     }
+@@ -39,8 +39,8 @@
+ 
+     buildTypes {
+         debug {
+-            applicationIdSuffix = ".hudtest"
+-            versionNameSuffix = "-hud-test"
++            applicationIdSuffix = ".sealhud"
++            versionNameSuffix = "-seal-hud-test2"
+         }
+         release {
+             optimization {
+--- a/mobile/src/debug/AndroidManifest.xml
++++ b/mobile/src/debug/AndroidManifest.xml
+@@ -1,7 +1,3 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+-    <uses-permission android:name="android.permission.BYDAUTO_INSTRUMENT_COMMON" />
+-<queries><package android:name="com.byd.clusterdebug" /></queries>
+-    <application android:label="DiPlay HUD Test" tools:replace="android:label">
+-    <receiver android:name="com.shilapi.xcertplay.hud.StarterBridgeReceiver" android:exported="true" android:permission="android.permission.DUMP" />
+-    <activity android:name="com.shilapi.xcertplay.hud.StandaloneHudDemoActivity" android:exported="true" android:permission="android.permission.DUMP" />
+-    </application></manifest>
++    <application android:label="DiPlay Seal HUD" tools:replace="android:label" />
++</manifest>
+--- a/shared/src/main/AndroidManifest.xml
++++ b/shared/src/main/AndroidManifest.xml
+@@ -31,6 +31,7 @@
+         <package android:name="com.byd.clusterdebug" />
+         <package android:name="com.ts.car.someip.service" />
+         <package android:name="com.byd.amapservice" />
++        <package android:name="com.example.amapservice" />
+         <intent>
+             <action android:name="com.android.settings.WIFI_TETHER_SETTINGS" />
+         </intent>
+--- a/shared/src/main/java/com/shilapi/xcertplay/hud/BydClusterBridge.kt
++++ b/shared/src/main/java/com/shilapi/xcertplay/hud/BydClusterBridge.kt
+@@ -2,9 +2,9 @@
+ 
+ import android.content.Context
+ import android.content.Intent
+-import android.content.pm.PackageManager
+ import android.util.Log
+ import com.shilapi.xcertplay.iap2.wire.Iap2Frame
++import java.util.Locale
+ import java.util.concurrent.Executors
+ import java.util.concurrent.TimeUnit
+ 
+@@ -14,7 +14,7 @@
+  */
+ internal object BydClusterBridge {
+     private const val TAG = "DiPlay-BYD-Cluster"
+-    private const val AMAP_PACKAGE = "com.byd.amapservice"
++    private var amapPackage: String? = null
+     private const val AMAP_ACTION = "AUTONAVI_STANDARD_BROADCAST_SEND"
+     private const val KEY_GUIDANCE = 10001
+     private const val KEY_STATE = 10019
+@@ -35,17 +35,13 @@
+     fun initialize(appContext: Context) = synchronized(lock) {
+         if (context != null) return@synchronized
+         context = appContext.applicationContext
+-        available = try {
+-            appContext.packageManager.getPackageInfo(AMAP_PACKAGE, 0)
+-            true
+-        } catch (_: PackageManager.NameNotFoundException) {
+-            false
+-        }
++        amapPackage = BydAmapAdapter.resolve(appContext)
++        available = amapPackage != null
+         if (!available && appContext.packageName.endsWith(".hudtest")) {
+             factory = BydFactoryNavigationOutput(appContext.applicationContext)
+             available = true
+         }
+-        Log.i(TAG, "cluster adapter available=$available factoryTest=${factory != null}")
++        Log.i(TAG, "cluster adapter available=$available target=$amapPackage factoryTest=${factory != null}")
+         if (available && !senderStarted) {
+             senderStarted = true
+             Executors.newSingleThreadScheduledExecutor { runnable ->
+@@ -101,6 +97,14 @@
+             putExtra("NEXT_ROAD_NAME", frame.road)
+             putExtra("ROUTE_REMAIN_DIS", frame.routeRemainingMeters)
+             putExtra("ROUTE_REMAIN_TIME", frame.routeRemainingSeconds)
++            if (amapPackage == "com.example.amapservice") {
++                // Inspected Seal adapter passes these strings separately to the cluster's
++                // simple-navigation card. Missing strings become literal "-1" on that card,
++                // even when the numeric fields already drive the HUD correctly.
++                putExtra("SEG_REMAIN_DIS_AUTO", distanceText(frame.distanceMeters))
++                putExtra("ROUTE_REMAIN_DIS_AUTO", distanceText(frame.routeRemainingMeters))
++                putExtra("ROUTE_REMAIN_TIME_AUTO", timeText(frame.routeRemainingSeconds))
++            }
+         }
+         if (broadcastLocked(intent)) {
+             lastSent = frame
+@@ -134,9 +138,23 @@
+         Log.i(TAG, "cluster guidance ended")
+     }
+ 
++    private fun distanceText(meters: Int): String = when {
++        meters < 0 -> ""
++        meters < 1000 -> "${meters}米"
++        meters % 1000 == 0 -> "${meters / 1000}公里"
++        else -> String.format(Locale.ROOT, "%.1f公里", meters / 1000.0)
++    }
++
++    private fun timeText(seconds: Int): String {
++        if (seconds < 0) return ""
++        val minutes = (seconds.toLong() + 59) / 60
++        return if (minutes < 60) "${minutes}分钟"
++        else "${minutes / 60}小时" + if (minutes % 60 == 0L) "" else "${minutes % 60}分钟"
++    }
++
+     // IS_BYD_MAP=true is required: the adapter drops foreign frames while it believes the stock map navigates.
+     private fun baseIntent(keyType: Int) = Intent(AMAP_ACTION).apply {
+-        setPackage(AMAP_PACKAGE)
++        setPackage(checkNotNull(amapPackage))
+         addFlags(FLAG_RECEIVER_INCLUDE_BACKGROUND)
+         putExtra("KEY_TYPE", keyType)
+         putExtra("IS_BYD_MAP", true)
+--- a/shared/src/main/java/com/shilapi/xcertplay/hud/BydOutputSettings.kt
++++ b/shared/src/main/java/com/shilapi/xcertplay/hud/BydOutputSettings.kt
+@@ -70,7 +70,7 @@
+ 
+     /** Whether the head unit has a BYD navigation receiver, so settings can hide a switch that cannot work. */
+     fun available(context: Context): Boolean =
+-        BydStandaloneHudOutput.available(context) || installed(context, "com.byd.amapservice") || installed(context, "com.ts.car.someip.service")
++        BydStandaloneHudOutput.available(context) || BydAmapAdapter.resolve(context) != null || installed(context, "com.ts.car.someip.service")
+ 
+     private fun installed(context: Context, pkg: String): Boolean =
+         runCatching { context.packageManager.getPackageInfo(pkg, 0) }.isSuccess
+--- /dev/null
++++ b/shared/src/main/java/com/shilapi/xcertplay/hud/BydAmapAdapter.kt
+@@ -0,0 +1,25 @@
++package com.shilapi.xcertplay.hud
++
++import android.content.Context
++import android.content.pm.ApplicationInfo
++import android.os.Build
++
++/** Select the stock receiver; the legacy profile is limited to the inspected Seal firmware. */
++internal object BydAmapAdapter {
++    private const val MODERN = "com.byd.amapservice"
++    private const val SEAL = "com.example.amapservice"
++    private const val SEAL_FIRMWARE = "BYD-AUTO/DiLink4.0/DiLink4.0:10/QKQ1.210218.001/eng.build.20260122.001308:user/release-keys"
++
++    fun resolve(context: Context): String? {
++        val manager = context.packageManager
++        if (runCatching { manager.getPackageInfo(MODERN, 0) }.isSuccess) return MODERN
++        if (Build.FINGERPRINT != SEAL_FIRMWARE) return null
++        return runCatching {
++            val info = manager.getPackageInfo(SEAL, 0)
++            SEAL.takeIf {
++                info.longVersionCode == 10502002L &&
++                    (info.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM != 0
++            }
++        }.getOrNull()
++    }
++}
+--- /dev/null
++++ b/shared/src/test/java/com/shilapi/xcertplay/hud/SealNavigationAdapterTest.kt
+@@ -0,0 +1,106 @@
++package com.shilapi.xcertplay.hud
++
++import android.content.pm.ApplicationInfo
++import android.content.pm.PackageInfo
++import com.shilapi.xcertplay.iap2.wire.Iap2Frame
++import java.io.ByteArrayOutputStream
++import org.junit.Assert.*
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.RuntimeEnvironment
++import org.robolectric.Shadows.shadowOf
++import org.robolectric.annotation.Config
++import org.robolectric.shadows.ShadowBuild
++
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [33], manifest = Config.NONE)
++class SealNavigationAdapterTest {
++    private val context get() = RuntimeEnvironment.getApplication()
++
++    private fun installLegacy(system: Boolean = true, version: Int = 10502002) {
++        ShadowBuild.setFingerprint("BYD-AUTO/DiLink4.0/DiLink4.0:10/QKQ1.210218.001/eng.build.20260122.001308:user/release-keys")
++        val info = PackageInfo().apply {
++            packageName = "com.example.amapservice"
++            setLongVersionCode(version.toLong())
++            applicationInfo = ApplicationInfo().apply {
++                packageName = infoPackage
++                flags = if (system) ApplicationInfo.FLAG_SYSTEM else 0
++            }
++        }
++        shadowOf(context.packageManager).installPackage(info)
++    }
++
++    @Test fun installedSealFactoryAdapterMakesNavigationSettingsAvailable() {
++        installLegacy()
++        assertEquals("com.example.amapservice", BydAmapAdapter.resolve(context))
++        assertTrue("The owner's factory adapter must expose the navigation setting", BydOutputSettings.available(context))
++    }
++
++    @Test fun absentAdapterDoesNotExposeUnsupportedNavigation() {
++        assertFalse(BydOutputSettings.available(context))
++    }
++
++    @Test fun thirdPartyPackageWithSameNameIsNotUsed() {
++        installLegacy(system = false)
++        assertFalse(BydOutputSettings.available(context))
++    }
++
++    @Test fun uninspectedFactoryVersionIsNotEnabled() {
++        installLegacy(version = 1)
++        assertFalse(BydOutputSettings.available(context))
++    }
++
++    @Test fun differentFirmwareIsNotEnabledByThisProfile() {
++        installLegacy()
++        ShadowBuild.setFingerprint("another-firmware")
++        assertFalse(BydOutputSettings.available(context))
++    }
++
++    @Test fun sealInstrumentReceivesTextDistancesAndTimeWithoutMinusOnePlaceholders() {
++        installLegacy()
++        BydOutputSettings.setEnabled(context, true)
++        BydClusterBridge.initialize(context)
++        try {
++            BydClusterBridge.onFrame(Iap2Frame(0x5202, parameters(
++                parameter(1, 0, 1), parameter(3, 2),
++                parameter(4, *"测试道路\u0000".toByteArray().map { it.toInt() and 255 }.toIntArray()),
++            )))
++            // The phone has not supplied totals yet. The cluster must show blanks, not -1.
++            BydClusterBridge.onFrame(Iap2Frame(0x5201, parameters(
++                parameter(1, 1), parameter(10, 0, 0, 0, 150), parameter(13, 0, 1),
++            )))
++            var sent = shadowOf(context).broadcastIntents.last { it.getIntExtra("KEY_TYPE", 0) == 10001 }
++            assertEquals("com.example.amapservice", sent.`package`)
++            assertEquals(150, sent.getIntExtra("SEG_REMAIN_DIS", -1))
++            assertEquals("150米", sent.getStringExtra("SEG_REMAIN_DIS_AUTO"))
++            assertEquals("", sent.getStringExtra("ROUTE_REMAIN_DIS_AUTO"))
++            assertEquals("", sent.getStringExtra("ROUTE_REMAIN_TIME_AUTO"))
++
++            BydClusterBridge.onFrame(Iap2Frame(0x5201, parameters(
++                parameter(6, 0, 0, 0, 0, 0, 0, 2, 89), // 601 seconds
++                parameter(7, 0, 0, 5, 220), // 1500 meters
++            )))
++            sent = shadowOf(context).broadcastIntents.last { it.getIntExtra("KEY_TYPE", 0) == 10001 }
++            assertEquals(1500, sent.getIntExtra("ROUTE_REMAIN_DIS", -1))
++            assertEquals(601, sent.getIntExtra("ROUTE_REMAIN_TIME", -1))
++            assertEquals("1.5公里", sent.getStringExtra("ROUTE_REMAIN_DIS_AUTO"))
++            assertEquals("11分钟", sent.getStringExtra("ROUTE_REMAIN_TIME_AUTO"))
++
++            BydClusterBridge.onFrame(Iap2Frame(0x5201, parameter(1, 2)))
++            assertEquals(9, shadowOf(context).broadcastIntents.last().getIntExtra("EXTRA_STATE", -1))
++        } finally {
++            BydClusterBridge.clear()
++        }
++    }
++
++    private fun parameter(id: Int, vararg values: Int): ByteArray = ByteArrayOutputStream().apply {
++        write((values.size + 4) ushr 8); write(values.size + 4)
++        write(id ushr 8); write(id)
++        values.forEach(::write)
++    }.toByteArray()
++
++    private fun parameters(vararg values: ByteArray): ByteArray = values.fold(byteArrayOf()) { a, b -> a + b }
++
++    companion object { private const val infoPackage = "com.example.amapservice" }
++}

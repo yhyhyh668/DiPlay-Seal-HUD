@@ -1,0 +1,13 @@
+Tests: 73, failures: 0, errors: 0, skipped: 0
+Build: successful
+Lint: 0 errors, 18 warnings
+APK v2 signature: verified
+Runtime authentication assets: unchanged
+Changed source files:
+mobile/build.gradle.kts
+mobile/src/debug/AndroidManifest.xml
+shared/src/main/AndroidManifest.xml
+shared/src/main/java/com/shilapi/xcertplay/hud/BydClusterBridge.kt
+shared/src/main/java/com/shilapi/xcertplay/hud/BydOutputSettings.kt
+shared/src/main/java/com/shilapi/xcertplay/hud/BydAmapAdapter.kt
+shared/src/test/java/com/shilapi/xcertplay/hud/SealNavigationAdapterTest.kt
